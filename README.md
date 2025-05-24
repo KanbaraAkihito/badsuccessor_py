@@ -378,13 +378,7 @@ Contributions are welcome! Please:
 
 ## 📚 References
 
-- [Original Akamai Research](https://www.akamai.com/blog/security-research/badsuccessor-abusing-dmsa-escalate-privileges-active-directory)
-- [Microsoft dMSA Documentation](https://docs.microsoft.com/en-us/windows-server/security/group-managed-service-accounts/group-managed-service-accounts-overview)
-- [LDAP3 Documentation](https://ldap3.readthedocs.io/)
-- [Impacket Framework](https://github.com/SecureAuthCorp/impacket)
-- [Python GSSAPI](https://github.com/pythongssapi/python-gssapi)
-- [Kerberos Protocol](https://www.rfc-editor.org/rfc/rfc4120)
-- [PAC Structure](https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-pac)
+- [Original Akamai Research](https://www.akamai.com/blog/security-research/abusing-dmsa-for-privilege-escalation-in-active-directory)
 
 ## 🐛 Known Issues
 
