@@ -13,7 +13,7 @@ BadSuccessor exploits a privilege escalation vulnerability in Windows Server 202
 ### Research Credit
 
 This tool is based on the excellent research by **Yuval Gordon** from **Akamai Technologies**:
-- [BadSuccessor: Abusing dMSA to Escalate Privileges in Active Directory](https://www.akamai.com/blog/security-research/badsuccessor-abusing-dmsa-escalate-privileges-active-directory)
+- [BadSuccessor: Abusing dMSA to Escalate Privileges in Active Directory](https://www.akamai.com/blog/security-research/abusing-dmsa-for-privilege-escalation-in-active-directory)
 
 ## 🎯 Vulnerability Details
 
