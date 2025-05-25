@@ -49,9 +49,13 @@ sudo yum install krb5-devel
 
 ### Required Permissions
 - Valid domain credentials (any user account)
-- `CreateChild` permission on at least one Organizational Unit
-  - This is often granted to regular users and considered "low risk"
-  - Tool automatically discovers writable OUs
+- **ANY** of the following permissions on at least one Organizational Unit:
+  - `CreateChild` permission
+  - `Write` permission
+  - `GenericWrite` permission
+  - `GenericAll` permission
+  - Member of default groups with write access (e.g., Authenticated Users)
+- Tool automatically discovers all writable OUs and shows specific permissions
 
 ## 🚀 Installation
 
@@ -76,7 +80,7 @@ python3 badsuccessor.py -d <domain> -u <username> -p <password> [options]
 # Check Windows Server 2025 schema support
 python3 badsuccessor.py -d corp.local -u john -p Password123 --check-schema
 
-# Find writable OUs
+# Find ALL writable OUs (not just CreateChild)
 python3 badsuccessor.py -d corp.local -u john -p Password123 --enumerate
 
 # List high-value targets
@@ -163,7 +167,7 @@ python3 badsuccessor.py -d corp.local -u john --hash :aad3b435b51404eeaad3b435b5
 #### Enumeration Options
 | Option | Description |
 |--------|-------------|
-| `--enumerate` | Enumerate writable OUs |
+| `--enumerate` | Enumerate OUs with ANY write permissions |
 | `--list-targets` | List high-value targets |
 | `--check-schema` | Verify Windows Server 2025 schema |
 
@@ -179,7 +183,7 @@ python3 badsuccessor.py -d corp.local -u john --hash :aad3b435b51404eeaad3b435b5
 
 ### Phase 1: Reconnaissance
 1. **Schema Verification**: Confirms Windows Server 2025 dMSA support
-2. **Permission Discovery**: Identifies OUs with CreateChild access
+2. **Permission Discovery**: Identifies OUs with ANY write access (not just CreateChild)
 3. **Target Enumeration**: Lists privileged accounts and service accounts
 
 ### Phase 2: Exploitation
@@ -199,12 +203,33 @@ The tool provides ready-to-use commands for:
 - Lateral movement
 - Persistence establishment
 
-## 🔐 Enhanced Features
+## 🔐 Enhanced Features (v2.1.0)
 
-### Proper ACL Permission Checking
-- Evaluates actual CreateChild permissions on OUs
-- Checks for specific object type creation rights
-- Retrieves user's token groups for comprehensive analysis
+### Comprehensive Permission Checking
+- **NEW**: Checks for ALL write permissions, not just CreateChild
+- **NEW**: Detects permissions from default groups (Authenticated Users, Everyone, etc.)
+- Evaluates actual permissions on OUs including:
+  - CreateChild
+  - Write
+  - GenericWrite
+  - GenericAll
+  - FullControl
+- Shows exact permissions for each discovered OU
+
+### Default Group Support
+- **NEW**: Automatically includes default group memberships in permission checks
+- Handles permissions granted to:
+  - Authenticated Users (S-1-5-11)
+  - Everyone (S-1-1-0)
+  - Domain Users
+  - Network
+  - Interactive
+  - This Organization
+
+### Complete Implementation
+- **FIXED**: All features fully implemented (no placeholder code)
+- **FIXED**: Proper error handling throughout
+- **IMPROVED**: More informative output and logging
 
 ### Windows Server 2025 Schema Verification
 - Validates all required dMSA schema elements
@@ -263,8 +288,11 @@ detection:
 ### Immediate Actions
 1. **Restrict OU Permissions**
    ```powershell
-   # Remove CreateChild from non-admin users
-   Remove-ADPermission -Identity "OU=ServiceAccounts,DC=corp,DC=local" -User "Domain Users" -AccessRights CreateChild
+   # Remove ALL write permissions from non-admin users
+   Remove-ADPermission -Identity "OU=ServiceAccounts,DC=corp,DC=local" -User "Domain Users" -AccessRights CreateChild,Write,GenericWrite,GenericAll
+
+   # Check for default group permissions
+   Get-ADPermission -Identity "OU=ServiceAccounts,DC=corp,DC=local" | Where-Object {$_.IdentityReference -match "Authenticated Users|Everyone"}
    ```
 
 2. **Monitor dMSA Operations**
@@ -282,7 +310,7 @@ detection:
 
 ### Long-term Solutions
 - Apply Microsoft patches when available
-- Regular permission audits
+- Regular permission audits (check ALL write permissions, not just CreateChild)
 - Principle of least privilege enforcement
 - Consider disabling dMSA if not required
 
@@ -348,10 +376,20 @@ Contributions are welcome! Please:
 
 ## 📝 Changelog
 
+### v2.1.0 (2025-05-25) - Complete Implementation
+- **MAJOR**: Enhanced ACL permission checking - now detects ALL write permissions
+- **MAJOR**: Added support for default groups (Authenticated Users, Everyone, etc.)
+- **FIXED**: Removed all placeholder code and AI comments
+- **FIXED**: Complete implementation of all features
+- **IMPROVED**: Better error handling and informative output
+- **IMPROVED**: More comprehensive OU enumeration (includes containers)
+- **FEATURE**: Shows exact permissions for each discovered OU
+- **FEATURE**: Detects protected users and delegation restrictions
+
 ### v2.0.0 (2025-05-24) - Enhanced Edition
 - **Major**: Full Kerberos authentication implementation
 - **Major**: KERB-DMSA-KEY-PACKAGE extraction for credential theft
-- **Major**: Proper ACL permission checking
+- **Major**: Basic ACL permission checking
 - **Major**: Windows Server 2025 schema verification
 - **Feature**: Mass credential extraction mode
 - **Feature**: Auto-pwn for automated domain takeover
@@ -379,6 +417,7 @@ Contributions are welcome! Please:
 ## 📚 References
 
 - [Original Akamai Research](https://www.akamai.com/blog/security-research/abusing-dmsa-for-privilege-escalation-in-active-directory)
+- [GitHub Issue #1 - Enhanced Permission Checking](https://github.com/cybrly/badsuccessor/issues/1)
 
 ## 🐛 Known Issues
 
