@@ -1,4 +1,4 @@
-# BadSuccessor
+# BadSuccessor.py
 
 A penetration testing tool that exploits the dMSA (delegated Managed Service Account) privilege escalation vulnerability in Windows Server 2025 Active Directory environments.
 
