@@ -470,7 +470,7 @@ Contributions are welcome! Please:
 
 ## 📝 Changelog
 
-### v3.0.0 (2025-05-28) - Production Ready Release
+### v2.3.0 (2025-05-28) - Production Ready Release
 - **NEW**: Dry run mode for safe attack simulation
 - **NEW**: Comprehensive session management with state persistence
 - **NEW**: Target account validation with detailed analysis
