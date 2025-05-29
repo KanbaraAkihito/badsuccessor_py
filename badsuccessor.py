@@ -4,7 +4,6 @@ BadSuccessor - Enhanced dMSA Privilege Escalation Tool (Linux Version)
 Author: Based on research by Yuval Gordon (Akamai)
 Description: Complete implementation of dMSA vulnerability exploitation for privilege escalation in Active Directory
 Platform: Linux (non-domain joined)
-Version: 2.0 - Production Ready with Enhanced Features
 Warning: For authorized penetration testing only
 """
 
@@ -1038,7 +1037,7 @@ class OutputFormatter:
         self.report_data = {
             'timestamp': datetime.now().isoformat(),
             'tool': 'BadSuccessor',
-            'version': '2.0',
+            'version': '2.3',
             'results': {}
         }
 
@@ -1135,7 +1134,7 @@ class BadSuccessor:
 ██████╔╝██║  ██║██████╔╝███████║╚██████╔╝╚██████╗╚██████╗███████╗███████║███████║╚██████╔╝██║  ██║
 ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚══════╝ ╚═════╝  ╚═════╝ ╚═════╝╚══════╝╚══════╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝
 {Colors.END}
-{Colors.CYAN}Enhanced dMSA Privilege Escalation Tool v3.0.0 - Production Ready{Colors.END}
+{Colors.CYAN}Enhanced dMSA Privilege Escalation Tool v2.3.0 (52825) {Colors.END}
 {Colors.YELLOW}Warning: For authorized penetration testing only!{Colors.END}
 """
         self.dc_ip = None
@@ -1995,7 +1994,7 @@ class BadSuccessor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="BadSuccessor - Enhanced dMSA Privilege Escalation Tool v2.0",
+        description="BadSuccessor - Enhanced dMSA Privilege Escalation Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
